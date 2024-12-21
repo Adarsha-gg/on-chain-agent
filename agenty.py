@@ -100,7 +100,7 @@ def wait_for_attestation(message_hash: str, max_attempts: int = 90) -> str:
     print(1)    
     raise TimeoutError("Attestation wait time exceeded")
 
-def bridge_usdc(source_wallet: Wallet, destination_wallet: str, amount: str) -> str:
+def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str) -> str:
     """Bridge USDC from Base to Arbitrum using Circle's CCTP.
 
     Args:
@@ -137,11 +137,12 @@ def bridge_usdc(source_wallet: Wallet, destination_wallet: str, amount: str) -> 
         abi=TOKEN_MESSENGER_ABI
     ).wait()
     print(4)    
+    
     # Step 3: Get messageHash from logs
-    receipt = source_wallet.get_transaction_receipt(deposit_tx.transaction.transaction_hash)
+    receipt = source_wallet.get_transaction_receipt(deposit_tx.transaction_hash)
     event_topic = to_hex(keccak(text="MessageSent(bytes)"))
-    message_log = next(log for log in receipt.logs if log.topics[0] == event_topic)
-    message_bytes = message_log.data
+    message_log = next(log for log in data.get('logs', []) if to_hex(log['topics'][0]) == event_topic)
+    message_bytes = message_log['data']
     message_hash = to_hex(keccak(hexstr=message_bytes))
     print(5)    
     # Step 4: Wait for attestation
