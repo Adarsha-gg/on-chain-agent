@@ -74,10 +74,10 @@ class BridgeUsdcInput(BaseModel):
         description="Amount of USDC to bridge (in wei)",
         example="1000000"  # 1 USDC
     )
-    destination_wallet_id: str = Field(
+    destination_wallet: str = Field(
         ...,
         description="The wallet ID on Arbitrum that will receive the bridged USDC",
-        example="wallet_xyz123"
+        example="0x4270b7C7DFa9547583779aa88B82ceaE847b863B"
     )
 
 def pad_address(address: str) -> str:
@@ -97,10 +97,10 @@ def wait_for_attestation(message_hash: str, max_attempts: int = 90) -> str:
             return attestation_response["attestation"]
             
         time.sleep(20)  # Wait 20 seconds between attempts
-        
+    print(1)    
     raise TimeoutError("Attestation wait time exceeded")
 
-def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str) -> str:
+def bridge_usdc(source_wallet: Wallet, destination_wallet: str, amount: str) -> str:
     """Bridge USDC from Base to Arbitrum using Circle's CCTP.
 
     Args:
@@ -112,8 +112,8 @@ def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str) 
         str: A message containing the bridge operation details and transaction hashes.
     """
     # Get initial balances
-    initial_base_balance = source_wallet.get_balance("usdc")
-    initial_arb_balance = destination_wallet.get_balance("usdc")
+    initial_base_balance = source_wallet.balance("usdc")
+    print(2)    
     
     # Step 1: Approve TokenMessenger as spender
     approve_tx = source_wallet.invoke_contract(
@@ -121,9 +121,10 @@ def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str) 
         method="approve",
         args={"spender": BASE_TOKEN_MESSENGER_ADDRESS, "value": amount}
     ).wait()
-    
+    print(3)    
     # Step 2: Call depositForBurn
-    destination_address = pad_address(destination_wallet.get_default_address())
+    destination_address = pad_address(destination_wallet)
+
     deposit_tx = source_wallet.invoke_contract(
         contract_address=BASE_TOKEN_MESSENGER_ADDRESS,
         method="depositForBurn",
@@ -135,16 +136,17 @@ def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str) 
         },
         abi=TOKEN_MESSENGER_ABI
     ).wait()
-    
+    print(4)    
     # Step 3: Get messageHash from logs
     receipt = source_wallet.get_transaction_receipt(deposit_tx.transaction.transaction_hash)
     event_topic = to_hex(keccak(text="MessageSent(bytes)"))
     message_log = next(log for log in receipt.logs if log.topics[0] == event_topic)
     message_bytes = message_log.data
     message_hash = to_hex(keccak(hexstr=message_bytes))
-    
+    print(5)    
     # Step 4: Wait for attestation
     attestation = wait_for_attestation(message_hash)
+    print(6)    
     
     # Step 5: Call receiveMessage on Arbitrum
     receive_tx = destination_wallet.invoke_contract(
@@ -156,7 +158,7 @@ def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str) 
         },
         abi=MESSAGE_TRANSMITTER_ABI
     ).wait()
-    
+    print(7)    
     # Get final balances
     final_base_balance = source_wallet.get_balance("usdc")
     final_arb_balance = destination_wallet.get_balance("usdc")
@@ -168,25 +170,6 @@ def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str) 
         f"Approve TX: {approve_tx.transaction.transaction_hash}\n"
         f"Deposit TX: {deposit_tx.transaction.transaction_hash}\n"
         f"Receive TX: {receive_tx.transaction.transaction_hash}"
-    )
-
-# 2. Add to cdp_langchain/utils/cdp_agentkit_wrapper.py
-
-def bridge_usdc_wrapper(self, amount: str, destination_wallet_id: str) -> str:
-    """Bridge USDC from Base to Arbitrum using Circle's CCTP.
-
-    Args:
-        amount (str): Amount of USDC to bridge (in wei).
-        destination_wallet_id (str): The wallet ID on Arbitrum that will receive the bridged USDC.
-
-    Returns:
-        str: A message containing the bridge operation details.
-    """
-    destination_wallet = Wallet.fetch(destination_wallet_id)
-    return bridge_usdc(
-        source_wallet=self.wallet,
-        destination_wallet=destination_wallet,
-        amount=amount
     )
 
 PRICE_TOOL_DESCRIPTION = """
@@ -296,10 +279,20 @@ def initialize_agent():
         func=run_token_price_tool,
         args_schema=TokenPriceTool,
     )
+
+    cross_chain_tool = CdpTool(
+        name="bridge_usdc",
+        description=BRIDGE_USDC_PROMPT,
+        cdp_agentkit_wrapper=agentkit,
+        func=bridge_usdc,
+        args_schema=BridgeUsdcInput,
+    )
+
     # Ensure tools is a list and add the new tool
     if tools is None:
         tools = []
     tools.append(realTool)
+    tools.append(cross_chain_tool)
     # Store buffered conversation history in memory.
     memory = MemorySaver()
     config = {"configurable": {"thread_id": "CDP Agentkit Chatbot Example!"}}
