@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import base64
+import requests
 
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
@@ -11,10 +13,91 @@ from langgraph.prebuilt import create_react_agent
 from cdp_langchain.agent_toolkits import CdpToolkit
 from cdp_langchain.utils import CdpAgentkitWrapper
 from cdp_langchain.tools import CdpTool
-import requests
-from typing import Optional
-from pydantic import BaseModel, Field
 
+from typing import Optional,Dict, Any
+from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+load_dotenv()
+WALLET_SEARCH_PROMPT = """
+This tool searches for all transactions (trades, swaps, transfers) associated with a given wallet address. It retrieves a summary of recent transaction activities across different protocols and token types.
+"""
+class EtherscanWalletSearchInput(BaseModel):
+    """Input argument schema for Etherscan wallet transaction search."""
+    wallet_address: str = Field(
+        ...,
+        description="The Ethereum wallet address to search for transactions (e.g., '0x742d35Cc6634C0532925a3b844Bc454e4438f44e')",
+        example="0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+    )
+    max_transactions: int = Field(
+        default=50,
+        description="Maximum number of transactions to retrieve",
+        ge=1,
+        le=1000
+    )
+
+def search_wallet_transactions(wallet_address: str, max_transactions: int = 50) -> str:
+     """
+     Search for transactions associated with a specific wallet address.
+     Args:
+        wallet_address (str): Ethereum wallet address to search.
+        api_key (str):  API key.
+        max_transactions (int, optional): Maximum number of transactions to retrieve. Defaults to 50.
+     Returns:
+        str: Summarized transaction information.
+    """    
+     API_KEY = os.getenv('WALLET_API_KEY')
+     encoded_key = base64.b64encode(API_KEY.encode()).decode()
+
+
+     query = """
+     query providerPorfolioQuery($addresses: [Address!]!, $networks: [Network!]!) {
+     portfolio(addresses: $addresses, networks: $networks) {
+        tokenBalances {
+        address
+        network
+        token {
+            balance
+            balanceUSD
+            baseToken {
+            name
+            symbol
+            }
+        }
+        }
+     }
+     }
+     """
+
+     response = requests.post(
+            'https://public.zapper.xyz/graphql',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Basic {encoded_key}'
+            },
+            json={
+                'query': query,
+                'variables': {
+                    'addresses': [wallet_address],
+                    'networks': ['ETHEREUM_MAINNET','POLYGON_MAINNET','BINANCE_SMART_CHAIN_MAINNET','BASE_MAINNET','METIS_MAINNET']
+                }
+            },
+            timeout=30
+        )
+     response.raise_for_status()
+     data = response.json()
+     if 'errors' in data:
+        raise ValueError(f"GraphQL Errors: {data['errors']}")
+     balance = data['data']['portfolio']['tokenBalances']
+     result = ''
+     for item in balance:
+        result += f"""Network:" {item["network"]}
+        Symbol: {item["token"]["baseToken"]["symbol"]}
+        Balance: {item["token"]["balance"]}
+        Balance USD: {item["token"]["balanceUSD"]}\n"""
+     return result   
+
+     
 PRICE_TOOL_DESCRIPTION = """
 Tool for retrieving real-time cryptocurrency token prices. 
 Supports fetching current market data including price, market cap, and 24-hour price change.
@@ -41,14 +124,15 @@ def get_token_price(token_identifier: str, currency: str = "USD") -> dict:
     Returns:
         dict: A dictionary containing token price information.
     """
+    Api = os.getenv('COINGECKO_API_KEY')
     try:
         # Determine if input is a contract address or a token symbol
         if token_identifier.startswith('0x'):
             # Use contract address lookup
-            url = f"https://api.coingecko.com/CG-2pUQLuvdJhQVuWUuyGZ61kRS/v3/simple/token_price/ethereum?contract_addresses={token_identifier}&vs_currencies=USD&include_market_cap=true&include_24hr_change=true"
+            url = f"https://api.coingecko.com/api/v3/simple/token_price/id={token_identifier}include_market_cap=true&include_24hr_vol=true&include_24hr_change=true&x_cg_demo_api_key={Api}"
         else:
             # Use token symbol lookup
-            url = f"https://api.coingecko.com/api/v3/simple/price?ids={token_identifier}&vs_currencies=USD&include_market_cap=true&x_cg_demo_api_key=CG-2pUQLuvdJhQVuWUuyGZ61kRS"
+             url = f"https://api.coingecko.com/api/v3/simple/price?ids={token_identifier}&vs_currencies=USD&include_market_cap=true&x_cg_demo_api_key={Api}"
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
@@ -122,10 +206,20 @@ def initialize_agent():
         func=run_token_price_tool,
         args_schema=TokenPriceTool,
     )
+
+    visualizer = CdpTool(
+        name="visualize_wallet",
+        description=WALLET_SEARCH_PROMPT,
+        cdp_agentkit_wrapper=agentkit,
+        func=search_wallet_transactions,
+        args_schema=EtherscanWalletSearchInput,
+    )
+
     # Ensure tools is a list and add the new tool
     if tools is None:
         tools = []
     tools.append(realTool)
+    tools.append(visualizer)
     # Store buffered conversation history in memory.
     memory = MemorySaver()
     config = {"configurable": {"thread_id": "CDP Agentkit Chatbot Example!"}}
