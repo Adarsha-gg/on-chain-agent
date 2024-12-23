@@ -22,9 +22,11 @@ from web3 import Web3
 from dotenv import load_dotenv
 
 load_dotenv()
+
 CLAIM_USDC_PROMPT = """
 This tool claims USDC using Circle's Cross-Chain Transfer Protocol (CCTP). This only handles attestations and message receiving on the destination chain.
 """
+
 class attestationInput(BaseModel):
     """Input argument schema for bridge USDC action."""
     
@@ -87,7 +89,7 @@ def recieve_cross_chain_message(destination_wallet: Wallet, message_bytes: str, 
             )
 
 BRIDGE_USDC_PROMPT = """
-This tool bridges USDC from Base to Arbitrum using Circle's Cross-Chain Transfer Protocol (CCTP). 
+This tool bridges USDC from Base-Mainnet to Arbitrum-Mainnet using Circle's Cross-Chain Transfer Protocol (CCTP). 
 It handles the complete bridging process including approval, deposit for burn, waiting for attestation, 
 and message receiving on the destination chain.
 """
@@ -368,7 +370,7 @@ Market Cap: {result['market_cap']} {currency}
 24h Change: {result['24h_change']}%"""
 
 # Configure a file to persist the agent's CDP MPC Wallet Data.
-wallet_data_file = "main_wallet.txt"
+wallet_data_file = "wallet_data.txt"
 
 
 def initialize_agent():
