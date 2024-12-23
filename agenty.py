@@ -166,7 +166,7 @@ def wait_for_attestation(message_hash: str, max_attempts: int = 90) -> str:
         time.sleep(20)  # Wait 20 seconds between attempts    
     raise TimeoutError("Attestation wait time exceeded")
 
-def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str, network:str) -> str:
+def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str) -> str:
     """Bridge USDC from Base to Arbitrum using Circle's CCTP.
 
     Args:
@@ -203,7 +203,7 @@ def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str, 
     ).wait()
 
     # Step 3: Get messageHash from logs
-    w3 = Web3(Web3.HTTPProvider(f'https://{network}.g.alchemy.com/v2/{os.getenv(ALCHEMY_API_KEY)}'))
+    w3 = Web3(Web3.HTTPProvider(f'https://base-mainnet.g.alchemy.com/v2/{os.getenv(ALCHEMY_API_KEY)}'))
     tx_hash = (deposit_tx.transaction_hash)
     data = w3.eth.get_transaction_receipt(tx_hash)# Get transaction receipt
     # Get logs from the transaction receipt
