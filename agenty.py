@@ -14,8 +14,124 @@ from cdp_langchain.agent_toolkits import CdpToolkit
 from cdp_langchain.utils import CdpAgentkitWrapper
 from cdp_langchain.tools import CdpTool
 
+
 from typing import Optional,Dict, Any
 from pydantic import BaseModel, Field
+from cdp import Wallet
+from web3 import Web3
+
+CLAIM_USDC_PROMPT = """
+This tool claims USDC using Circle's Cross-Chain Transfer Protocol (CCTP). This only handles attestations and message receiving on the destination chain.
+"""
+class attestationInput(BaseModel):
+    """Input argument schema for bridge USDC action."""
+    
+    attestation: str = Field(
+        ...,
+        description="The attestation from Circle's Iris service",
+        example="0x4270b7C7DFa9547583779aa88B82ceaE847b863B"
+    )
+    message_bytes: str = Field(
+        ...,
+        description="The message bytes from the transaction log",
+        example="000000000000000600000003000000000005B94E0000000000000000000000001682AE6375C4E4A97E4B583BC394C861A46D896200000000000000000000000019330D10D9CC8751218EAF51E8885D058642E08A000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000833589FCD6EDB6E08F4C7C32D4F71B54BDA029130000000000000000000000004270B7C7DFA9547583779AA88B82CEAE847B863B00000000000000000000000000000000000000000000000000000000001E848000000000000000000000000090D8E247C115C205E915FA9CA250175A78292EFA00"
+    )
+
+def load_wallet_from_file(filename: str) -> Optional[Wallet]:
+    """Load wallet details from a file."""
+    if os.path.exists(filename):
+        with open(filename, "r") as file:
+            wallet_data = file.read()
+        return Wallet.from_json(wallet_data)
+    return None
+
+def recieve_cross_chain_message(destination_wallet: Wallet, message_bytes: str, attestation: str) -> str:
+    """Receive cross-chain message. Try with the current wallet, and fall back to stored wallet if necessary."""
+    try:
+        # Attempt using the provided destination wallet
+        receive_tx = destination_wallet.invoke_contract(
+            contract_address=ARBITRUM_MESSAGE_TRANSMITTER_ADDRESS,
+            method="receiveMessage",
+            args={
+                "message": message_bytes,
+                "attestation": attestation,
+            },
+            abi=MESSAGE_TRANSMITTER_ABI,
+        ).wait()
+        return receive_tx.transaction.transaction_hash
+    except Exception as e:
+        print(f"Error using current wallet: {str(e)}")
+
+        # Fallback: Load wallet from file and retry
+        fallback_wallet = load_wallet_from_file("ar_wallet.txt")
+        if fallback_wallet is None:
+            raise ValueError("Failed to load fallback wallet from ar_wallet.txt.")
+
+        print("Retrying with fallback wallet...")
+        try:
+            receive_tx = fallback_wallet.invoke_contract(
+                contract_address=ARBITRUM_MESSAGE_TRANSMITTER_ADDRESS,
+                method="receiveMessage",
+                args={
+                    "message": message_bytes,
+                    "attestation": attestation,
+                },
+                abi=MESSAGE_TRANSMITTER_ABI,
+            ).wait()
+            return receive_tx.transaction.transaction_hash
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"Both current and fallback wallets failed: {str(fallback_error)}"
+            )
+
+BRIDGE_USDC_PROMPT = """
+This tool bridges USDC from Base to Arbitrum using Circle's Cross-Chain Transfer Protocol (CCTP). 
+It handles the complete bridging process including approval, deposit for burn, waiting for attestation, 
+and message receiving on the destination chain.
+"""
+
+# Contract addresses
+BASE_TOKEN_MESSENGER_ADDRESS = "0x1682Ae6375C4E4A97e4B583BC394c861A46D8962"
+ARBITRUM_MESSAGE_TRANSMITTER_ADDRESS = "0xC30362313FBBA5cf9163F0bb16a0e01f01A896ca"
+USDC_BASE_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+# ABI definitions
+TOKEN_MESSENGER_ABI = [
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "amount", "type": "uint256"},
+            {"internalType": "uint32", "name": "destinationDomain", "type": "uint32"},
+            {"internalType": "bytes32", "name": "mintRecipient", "type": "bytes32"},
+            {"internalType": "address", "name": "burnToken", "type": "address"},
+        ],
+        "name": "depositForBurn",
+        "outputs": [
+            {"internalType": "uint64", "name": "_nonce", "type": "uint64"},
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+MESSAGE_TRANSMITTER_ABI = [
+    {
+        "inputs": [
+            {"internalType": "bytes", "name": "message", "type": "bytes"},
+            {"internalType": "bytes", "name": "attestation", "type": "bytes"},
+        ],
+        "name": "receiveMessage",
+        "outputs": [
+            {"internalType": "bool", "name": "success", "type": "bool"},
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+class BridgeUsdcInput(BaseModel):
+    """Input argument schema for bridge USDC action."""
+    
+    amount: str = Field(
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,11 +145,90 @@ class EtherscanWalletSearchInput(BaseModel):
         description="The Ethereum wallet address to search for transactions (e.g., '0x742d35Cc6634C0532925a3b844Bc454e4438f44e')",
         example="0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
     )
+
+def pad_address(address: str) -> str:
+    """Pad an Ethereum address to 32 bytes."""
+    address = address.replace("0x", "")
+    return "0x" + address.zfill(64)
     max_transactions: int = Field(
         default=50,
         description="Maximum number of transactions to retrieve",
         ge=1,
         le=1000
+    )
+
+def wait_for_attestation(message_hash: str, max_attempts: int = 90) -> str:
+    """Wait for and retrieve attestation from Circle's Iris service."""
+    for _ in range(max_attempts):
+        response = requests.get(
+            f"https://iris-api.circle.com/attestations/{message_hash}"
+        )
+        attestation_response = response.json()
+        
+        if attestation_response["status"] == "complete":
+            return attestation_response["attestation"]
+            
+        time.sleep(20)  # Wait 20 seconds between attempts    
+    raise TimeoutError("Attestation wait time exceeded")
+
+def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str, network:str) -> str:
+    """Bridge USDC from Base to Arbitrum using Circle's CCTP.
+
+    Args:
+        source_wallet (Wallet): The Base network wallet containing USDC to bridge.
+        destination_wallet (Wallet): The Arbitrum network wallet to receive the USDC.
+        amount (str): Amount of USDC to bridge (in wei).
+
+    Returns:
+        str: A message containing the bridge operation details and transaction hashes.
+    """
+    # Get initial balances
+    initial_base_balance = source_wallet.balance("usdc")  
+    
+    # Step 1: Approve TokenMessenger as spender
+    approve_tx = source_wallet.invoke_contract(
+        contract_address=USDC_BASE_ADDRESS,
+        method="approve",
+        args={"spender": BASE_TOKEN_MESSENGER_ADDRESS, "value": amount}
+    ).wait()
+
+    # Step 2: Call depositForBurn
+    destination_address = pad_address(destination_wallet)
+
+    deposit_tx = source_wallet.invoke_contract(
+        contract_address=BASE_TOKEN_MESSENGER_ADDRESS,
+        method="depositForBurn",
+        args={
+            "amount": amount,
+            "destinationDomain": "3",  # Arbitrum domain
+            "mintRecipient": destination_address,
+            "burnToken": USDC_BASE_ADDRESS
+        },
+        abi=TOKEN_MESSENGER_ABI
+    ).wait()
+
+    # Step 3: Get messageHash from logs
+    w3 = Web3(Web3.HTTPProvider(f'https://{network}.g.alchemy.com/v2/{ALCHEMY_API_KEY}'))
+    tx_hash = (deposit_tx.transaction_hash)
+    data = w3.eth.get_transaction_receipt(tx_hash)# Get transaction receipt
+    # Get logs from the transaction receipt
+    logs = data['logs']
+    event_topic = to_hex(keccak(text="MessageSent(bytes)"))
+    message_log = next(log for log in data.get('logs', []) if to_hex(log['topics'][0]) == event_topic) # Extract the first log containing the specific topic
+    message_bytes = (message_log['data']).hex()# Extract the 'data' field from the log
+    message_bytes = message_bytes[128:624].upper()
+    message_hash = f'0x{w3.keccak(hexstr=message_bytes).hex()}'
+    
+    # Step 4: Wait for attestation
+    attestation = wait_for_attestation(message_hash)
+    
+    receive_tx = recieve_cross_chain_message(destination_wallet, message_bytes, attestation) 
+    
+    return (
+        f"USDC Bridge completed successfully!\n"
+        f"Approve TX: {approve_tx.transaction_hash}\n"
+        f"Deposit TX: {deposit_tx.transaction_hash}\n"
+        f"Receive TX: {receive_tx.transaction_hash}"
     )
 
 def search_wallet_transactions(wallet_address: str, max_transactions: int = 50) -> str:
@@ -149,6 +344,7 @@ def get_token_price(token_identifier: str, currency: str = "USD") -> dict:
         }
     except requests.RequestException as e:
         return {"error": f"API request failed: {str(e)}"}
+
 def run_token_price_tool(token_identifier: str, currency: str = "USD") -> str:
     """Wrapper function to run the token price tool and format output.
     Args:
@@ -168,7 +364,7 @@ Market Cap: {result['market_cap']} {currency}
 24h Change: {result['24h_change']}%"""
 
 # Configure a file to persist the agent's CDP MPC Wallet Data.
-wallet_data_file = "mainnet_wallet.txt"
+wallet_data_file = "main_wallet.txt"
 
 
 def initialize_agent():
@@ -207,6 +403,22 @@ def initialize_agent():
         args_schema=TokenPriceTool,
     )
 
+    cross_chain_tool = CdpTool(
+        name="bridge_usdc",
+        description=BRIDGE_USDC_PROMPT,
+        cdp_agentkit_wrapper=agentkit,
+        func=bridge_usdc,
+        args_schema=BridgeUsdcInput,
+    )
+
+    receive_cross_chain_message_tool = CdpTool(
+        name="recieve_cross_chain_message",
+        description=CLAIM_USDC_PROMPT,
+        cdp_agentkit_wrapper=agentkit,
+        func=recieve_cross_chain_message,
+        args_schema=attestationInput
+    )
+
     visualizer = CdpTool(
         name="visualize_wallet",
         description=WALLET_SEARCH_PROMPT,
@@ -219,6 +431,8 @@ def initialize_agent():
     if tools is None:
         tools = []
     tools.append(realTool)
+    tools.append(cross_chain_tool)
+    tools.append(receive_cross_chain_message_tool)
     tools.append(visualizer)
     # Store buffered conversation history in memory.
     memory = MemorySaver()
