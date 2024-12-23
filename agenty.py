@@ -19,7 +19,9 @@ from typing import Optional,Dict, Any
 from pydantic import BaseModel, Field
 from cdp import Wallet
 from web3 import Web3
+from dotenv import load_dotenv
 
+load_dotenv()
 CLAIM_USDC_PROMPT = """
 This tool claims USDC using Circle's Cross-Chain Transfer Protocol (CCTP). This only handles attestations and message receiving on the destination chain.
 """
@@ -132,18 +134,9 @@ class BridgeUsdcInput(BaseModel):
     """Input argument schema for bridge USDC action."""
     
     amount: str = Field(
-from dotenv import load_dotenv
-
-load_dotenv()
-WALLET_SEARCH_PROMPT = """
-This tool searches for all transactions (trades, swaps, transfers) associated with a given wallet address. It retrieves a summary of recent transaction activities across different protocols and token types.
-"""
-class EtherscanWalletSearchInput(BaseModel):
-    """Input argument schema for Etherscan wallet transaction search."""
-    wallet_address: str = Field(
         ...,
-        description="The Ethereum wallet address to search for transactions (e.g., '0x742d35Cc6634C0532925a3b844Bc454e4438f44e')",
-        example="0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+        description="Amount of USDC to bridge (in wei)",
+        example="1000000"  # 1 USDC
     )
 
 def pad_address(address: str) -> str:
@@ -208,7 +201,7 @@ def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str, 
     ).wait()
 
     # Step 3: Get messageHash from logs
-    w3 = Web3(Web3.HTTPProvider(f'https://{network}.g.alchemy.com/v2/{ALCHEMY_API_KEY}'))
+    w3 = Web3(Web3.HTTPProvider(f'https://{network}.g.alchemy.com/v2/{os.getenv(ALCHEMY_API_KEY)}'))
     tx_hash = (deposit_tx.transaction_hash)
     data = w3.eth.get_transaction_receipt(tx_hash)# Get transaction receipt
     # Get logs from the transaction receipt
@@ -229,6 +222,17 @@ def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str, 
         f"Approve TX: {approve_tx.transaction_hash}\n"
         f"Deposit TX: {deposit_tx.transaction_hash}\n"
         f"Receive TX: {receive_tx.transaction_hash}"
+    )
+
+WALLET_SEARCH_PROMPT = """
+This tool searches for all transactions (trades, swaps, transfers) associated with a given wallet address. It retrieves a summary of recent transaction activities across different protocols and token types.
+"""
+class EtherscanWalletSearchInput(BaseModel):
+    """Input argument schema for Etherscan wallet transaction search."""
+    wallet_address: str = Field(
+        ...,
+        description="The Ethereum wallet address to search for transactions (e.g., '0x742d35Cc6634C0532925a3b844Bc454e4438f44e')",
+        example="0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
     )
 
 def search_wallet_transactions(wallet_address: str, max_transactions: int = 50) -> str:
