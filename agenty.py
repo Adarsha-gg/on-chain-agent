@@ -46,7 +46,7 @@ def load_wallet_from_file(filename: str) -> Optional[Wallet]:
     if os.path.exists(filename):
         with open(filename, "r") as file:
             wallet_data = file.read()
-        return Wallet.from_json(wallet_data)
+        return Wallet.import_data(wallet_data[14:52])
     return None
 
 def recieve_cross_chain_message(destination_wallet: Wallet, message_bytes: str, attestation: str) -> str:
@@ -141,16 +141,17 @@ class BridgeUsdcInput(BaseModel):
         example="1000000"  # 1 USDC
     )
 
+    destination_wallet: Wallet = Field(
+        ...,
+        description="The Arbitrum wallet to receive the USDC",
+        example="0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+    )
+
 def pad_address(address: str) -> str:
     """Pad an Ethereum address to 32 bytes."""
     address = address.replace("0x", "")
     return "0x" + address.zfill(64)
-    max_transactions: int = Field(
-        default=50,
-        description="Maximum number of transactions to retrieve",
-        ge=1,
-        le=1000
-    )
+    
 
 def wait_for_attestation(message_hash: str, max_attempts: int = 90) -> str:
     """Wait for and retrieve attestation from Circle's Iris service."""
@@ -235,6 +236,12 @@ class EtherscanWalletSearchInput(BaseModel):
         ...,
         description="The Ethereum wallet address to search for transactions (e.g., '0x742d35Cc6634C0532925a3b844Bc454e4438f44e')",
         example="0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+    )
+    max_transactions: int = Field(
+        default=50,
+        description="Maximum number of transactions to retrieve",
+        ge=1,
+        le=1000
     )
 
 def search_wallet_transactions(wallet_address: str, max_transactions: int = 50) -> str:
