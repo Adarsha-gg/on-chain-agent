@@ -3,6 +3,8 @@ import sys
 import time
 import base64
 import requests
+import logging
+import json
 
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
@@ -22,6 +24,146 @@ from web3 import Web3
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+BRIDGE_USDC_PROMPT = """
+This tool bridges USDC from Base-Mainnet to Arbitrum-Mainnet using Circle's Cross-Chain Transfer Protocol (CCTP). 
+It handles the complete bridging process including approval, deposit for burn, waiting for attestation, 
+and message receiving on the destination chain.
+"""
+
+# Contract addresses
+BASE_TOKEN_MESSENGER_ADDRESS = "0x1682Ae6375C4E4A97e4B583BC394c861A46D8962"
+ARBITRUM_MESSAGE_TRANSMITTER_ADDRESS = "0xC30362313FBBA5cf9163F0bb16a0e01f01A896ca"
+USDC_BASE_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+# ABI definitions
+TOKEN_MESSENGER_ABI = [
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "amount", "type": "uint256"},
+            {"internalType": "uint32", "name": "destinationDomain", "type": "uint32"},
+            {"internalType": "bytes32", "name": "mintRecipient", "type": "bytes32"},
+            {"internalType": "address", "name": "burnToken", "type": "address"},
+        ],
+        "name": "depositForBurn",
+        "outputs": [
+            {"internalType": "uint64", "name": "_nonce", "type": "uint64"},
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+MESSAGE_TRANSMITTER_ABI = [
+    {
+        "inputs": [
+            {"internalType": "bytes", "name": "message", "type": "bytes"},
+            {"internalType": "bytes", "name": "attestation", "type": "bytes"},
+        ],
+        "name": "receiveMessage",
+        "outputs": [
+            {"internalType": "bool", "name": "success", "type": "bool"},
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+class BridgeUsdcInput(BaseModel):
+    """Input argument schema for bridge USDC action."""
+    amount: str = Field(
+        ...,
+        description="Amount of USDC to bridge (in wei)",
+        example="1000000"  # 1 USDC
+    )
+    destination_wallet: str = Field(
+        ...,
+        description="The Arbitrum wallet to receive the USDC",
+        example="0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+    )
+
+def pad_address(address: str) -> str:
+    """Pad an Ethereum address to 32 bytes."""
+    address = address.replace("0x", "")
+    return "0x" + address.zfill(64)
+    
+
+def wait_for_attestation(message_hash: str, max_attempts: int = 90) -> str:
+    """Wait for and retrieve attestation from Circle's Iris service."""
+    for _ in range(max_attempts):
+        response = requests.get(
+            f"https://iris-api.circle.com/attestations/{message_hash}"
+        )
+        attestation_response = response.json()
+        
+        if attestation_response["status"] == "complete":
+            return attestation_response["attestation"]
+            
+        time.sleep(20)  # Wait 20 seconds between attempts    
+    raise TimeoutError("Attestation wait time exceeded")
+
+def bridge_usdc(source_wallet: Wallet, destination_wallet: str, amount: str) -> str:
+    """Bridge USDC from Base to Arbitrum using Circle's CCTP.
+
+    Args:
+        source_wallet (Wallet): The Base network wallet containing USDC to bridge.
+        destination_wallet (Wallet): The Arbitrum network wallet to receive the USDC.
+        amount (str): Amount of USDC to bridge (in wei).
+
+    Returns:
+        str: A message containing the bridge operation details and transaction hashes.
+    """
+    # Get initial balances
+    initial_base_balance = source_wallet.balance("usdc")  
+    
+    # Step 1: Approve TokenMessenger as spender
+    approve_tx = source_wallet.invoke_contract(
+        contract_address=USDC_BASE_ADDRESS,
+        method="approve",
+        args={"spender": BASE_TOKEN_MESSENGER_ADDRESS, "value": amount}
+    ).wait()
+
+    # Step 2: Call depositForBurn
+    destination_address = pad_address(destination_wallet)
+
+    deposit_tx = source_wallet.invoke_contract(
+        contract_address=BASE_TOKEN_MESSENGER_ADDRESS,
+        method="depositForBurn",
+        args={
+            "amount": amount,
+            "destinationDomain": "3",  # Arbitrum domain
+            "mintRecipient": destination_address,
+            "burnToken": USDC_BASE_ADDRESS
+        },
+        abi=TOKEN_MESSENGER_ABI
+    ).wait()
+
+    # Step 3: Get messageHash from logs
+    w3 = Web3(Web3.HTTPProvider(f'https://base-mainnet.g.alchemy.com/v2/{os.getenv(ALCHEMY_API_KEY)}'))
+    tx_hash = (deposit_tx.transaction_hash)
+    data = w3.eth.get_transaction_receipt(tx_hash)# Get transaction receipt
+    # Get logs from the transaction receipt
+    logs = data['logs']
+    event_topic = to_hex(keccak(text="MessageSent(bytes)"))
+    message_log = next(log for log in data.get('logs', []) if to_hex(log['topics'][0]) == event_topic) # Extract the first log containing the specific topic
+    message_bytes = (message_log['data']).hex()# Extract the 'data' field from the log
+    message_bytes = message_bytes[128:624].upper()
+    message_hash = f'0x{w3.keccak(hexstr=message_bytes).hex()}'
+    
+    # Step 4: Wait for attestation
+    attestation = wait_for_attestation(message_hash)
+    
+    receive_tx = recieve_cross_chain_message(destination_wallet, message_bytes, attestation) 
+    
+    return (
+        f"USDC Bridge completed successfully!\n"
+        f"Approve TX: {approve_tx.transaction_hash}\n"
+        f"Deposit TX: {deposit_tx.transaction_hash}\n"
+        f"Receive TX: {receive_tx.transaction_hash}"
+    )
 
 CLAIM_USDC_PROMPT = """
 This tool claims USDC using Circle's Cross-Chain Transfer Protocol (CCTP). This only handles attestations and message receiving on the destination chain.
@@ -88,223 +230,171 @@ def recieve_cross_chain_message(destination_wallet: Wallet, message_bytes: str, 
                 f"Both current and fallback wallets failed: {str(fallback_error)}"
             )
 
-BRIDGE_USDC_PROMPT = """
-This tool bridges USDC from Base-Mainnet to Arbitrum-Mainnet using Circle's Cross-Chain Transfer Protocol (CCTP). 
-It handles the complete bridging process including approval, deposit for burn, waiting for attestation, 
-and message receiving on the destination chain.
-"""
-
-# Contract addresses
-BASE_TOKEN_MESSENGER_ADDRESS = "0x1682Ae6375C4E4A97e4B583BC394c861A46D8962"
-ARBITRUM_MESSAGE_TRANSMITTER_ADDRESS = "0xC30362313FBBA5cf9163F0bb16a0e01f01A896ca"
-USDC_BASE_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-
-# ABI definitions
-TOKEN_MESSENGER_ABI = [
-    {
-        "inputs": [
-            {"internalType": "uint256", "name": "amount", "type": "uint256"},
-            {"internalType": "uint32", "name": "destinationDomain", "type": "uint32"},
-            {"internalType": "bytes32", "name": "mintRecipient", "type": "bytes32"},
-            {"internalType": "address", "name": "burnToken", "type": "address"},
-        ],
-        "name": "depositForBurn",
-        "outputs": [
-            {"internalType": "uint64", "name": "_nonce", "type": "uint64"},
-        ],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    }
-]
-
-MESSAGE_TRANSMITTER_ABI = [
-    {
-        "inputs": [
-            {"internalType": "bytes", "name": "message", "type": "bytes"},
-            {"internalType": "bytes", "name": "attestation", "type": "bytes"},
-        ],
-        "name": "receiveMessage",
-        "outputs": [
-            {"internalType": "bool", "name": "success", "type": "bool"},
-        ],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    }
-]
-
-class BridgeUsdcInput(BaseModel):
-    """Input argument schema for bridge USDC action."""
-    
-    amount: str = Field(
-        ...,
-        description="Amount of USDC to bridge (in wei)",
-        example="1000000"  # 1 USDC
-    )
-
-    destination_wallet: Wallet = Field(
-        ...,
-        description="The Arbitrum wallet to receive the USDC",
-        example="0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
-    )
-
-def pad_address(address: str) -> str:
-    """Pad an Ethereum address to 32 bytes."""
-    address = address.replace("0x", "")
-    return "0x" + address.zfill(64)
-    
-
-def wait_for_attestation(message_hash: str, max_attempts: int = 90) -> str:
-    """Wait for and retrieve attestation from Circle's Iris service."""
-    for _ in range(max_attempts):
-        response = requests.get(
-            f"https://iris-api.circle.com/attestations/{message_hash}"
-        )
-        attestation_response = response.json()
-        
-        if attestation_response["status"] == "complete":
-            return attestation_response["attestation"]
-            
-        time.sleep(20)  # Wait 20 seconds between attempts    
-    raise TimeoutError("Attestation wait time exceeded")
-
-def bridge_usdc(source_wallet: Wallet, destination_wallet: Wallet, amount: str) -> str:
-    """Bridge USDC from Base to Arbitrum using Circle's CCTP.
-
-    Args:
-        source_wallet (Wallet): The Base network wallet containing USDC to bridge.
-        destination_wallet (Wallet): The Arbitrum network wallet to receive the USDC.
-        amount (str): Amount of USDC to bridge (in wei).
-
-    Returns:
-        str: A message containing the bridge operation details and transaction hashes.
-    """
-    # Get initial balances
-    initial_base_balance = source_wallet.balance("usdc")  
-    
-    # Step 1: Approve TokenMessenger as spender
-    approve_tx = source_wallet.invoke_contract(
-        contract_address=USDC_BASE_ADDRESS,
-        method="approve",
-        args={"spender": BASE_TOKEN_MESSENGER_ADDRESS, "value": amount}
-    ).wait()
-
-    # Step 2: Call depositForBurn
-    destination_address = pad_address(destination_wallet)
-
-    deposit_tx = source_wallet.invoke_contract(
-        contract_address=BASE_TOKEN_MESSENGER_ADDRESS,
-        method="depositForBurn",
-        args={
-            "amount": amount,
-            "destinationDomain": "3",  # Arbitrum domain
-            "mintRecipient": destination_address,
-            "burnToken": USDC_BASE_ADDRESS
-        },
-        abi=TOKEN_MESSENGER_ABI
-    ).wait()
-
-    # Step 3: Get messageHash from logs
-    w3 = Web3(Web3.HTTPProvider(f'https://base-mainnet.g.alchemy.com/v2/{os.getenv(ALCHEMY_API_KEY)}'))
-    tx_hash = (deposit_tx.transaction_hash)
-    data = w3.eth.get_transaction_receipt(tx_hash)# Get transaction receipt
-    # Get logs from the transaction receipt
-    logs = data['logs']
-    event_topic = to_hex(keccak(text="MessageSent(bytes)"))
-    message_log = next(log for log in data.get('logs', []) if to_hex(log['topics'][0]) == event_topic) # Extract the first log containing the specific topic
-    message_bytes = (message_log['data']).hex()# Extract the 'data' field from the log
-    message_bytes = message_bytes[128:624].upper()
-    message_hash = f'0x{w3.keccak(hexstr=message_bytes).hex()}'
-    
-    # Step 4: Wait for attestation
-    attestation = wait_for_attestation(message_hash)
-    
-    receive_tx = recieve_cross_chain_message(destination_wallet, message_bytes, attestation) 
-    
-    return (
-        f"USDC Bridge completed successfully!\n"
-        f"Approve TX: {approve_tx.transaction_hash}\n"
-        f"Deposit TX: {deposit_tx.transaction_hash}\n"
-        f"Receive TX: {receive_tx.transaction_hash}"
-    )
+import os
+import logging
+import requests
+from typing import Optional, Dict, Any
+from pydantic import BaseModel, Field
 
 WALLET_SEARCH_PROMPT = """
-This tool searches for all transactions (trades, swaps, transfers) associated with a given wallet address. It retrieves a summary of recent transaction activities across different protocols and token types.
+This tool searches for token balances across multiple networks using Zapper API, showing both token amounts and USD values.
 """
-class EtherscanWalletSearchInput(BaseModel):
-    """Input argument schema for Etherscan wallet transaction search."""
+
+class WalletSearchInput(BaseModel):
+    """Input arguments for wallet search."""
     wallet_address: str = Field(
         ...,
-        description="The Ethereum wallet address to search for transactions (e.g., '0x742d35Cc6634C0532925a3b844Bc454e4438f44e')",
+        description="The wallet address to look up",
         example="0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
     )
-    max_transactions: int = Field(
-        default=50,
-        description="Maximum number of transactions to retrieve",
-        ge=1,
-        le=1000
+
+import os
+import base64
+import logging
+import requests
+from typing import Dict, Any, Optional
+from pydantic import BaseModel, Field
+
+WALLET_SEARCH_PROMPT = """
+This tool fetches wallet token balances across networks using Zapper's GraphQL API.
+"""
+
+class WalletSearchInput(BaseModel):
+    """Input arguments for wallet search."""
+    wallet_address: str = Field(
+        ...,
+        description="The wallet address to look up",
+        example="0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
     )
 
-def search_wallet_transactions(wallet_address: str, max_transactions: int = 50) -> str:
-     """
-     Search for transactions associated with a specific wallet address.
-     Args:
-        wallet_address (str): Ethereum wallet address to search.
-        api_key (str):  API key.
-        max_transactions (int, optional): Maximum number of transactions to retrieve. Defaults to 50.
-     Returns:
-        str: Summarized transaction information.
-    """    
-     API_KEY = os.getenv('WALLET_API_KEY')
-     encoded_key = base64.b64encode(API_KEY.encode()).decode()
+def search_wallet_data(wallet_address: str) -> str:
+    """
+    Fetch wallet token balances using Zapper's GraphQL API.
+    
+    Args:
+        wallet_address: The wallet address to look up
+    
+    Returns:
+        str: A human-readable summary of the wallet's token balances
+    """
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.WARNING)
+    
+    # Get and encode API key
+    api_key = os.getenv('ZAPPER_API_KEY')
+    if not api_key:
+        return "Error: ZAPPER_API_KEY not found in environment variables"
+    
+    encoded_key = base64.b64encode(api_key.encode()).decode()
 
-
-     query = """
-     query providerPorfolioQuery($addresses: [Address!]!, $networks: [Network!]!) {
-     portfolio(addresses: $addresses, networks: $networks) {
-        tokenBalances {
-        address
-        network
-        token {
-            balance
-            balanceUSD
-            baseToken {
-            name
-            symbol
+    # GraphQL query for token balances
+    query = """
+    query PortfolioQuery($addresses: [Address!]!, $networks: [Network!]!) {
+        portfolio(addresses: $addresses, networks: $networks) {
+            tokenBalances {
+                address
+                network
+                token {
+                    balance
+                    balanceUSD
+                    baseToken {
+                        name
+                        symbol
+                    }
+                }
             }
         }
-        }
-     }
-     }
-     """
+    }
+    """
 
-     response = requests.post(
-            'https://public.zapper.xyz/graphql',
-            headers={
-                'Content-Type': 'application/json',
-                'Authorization': f'Basic {encoded_key}'
-            },
+    # API request configuration
+    url = 'https://public.zapper.xyz/graphql'
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Basic {encoded_key}'
+    }
+    
+    variables = {
+        'addresses': [wallet_address],
+        'networks': [
+            'ETHEREUM_MAINNET',
+            'POLYGON_MAINNET',
+            'OPTIMISM_MAINNET',
+            'ARBITRUM_MAINNET',
+            'BASE_MAINNET'
+        ]
+    }
+
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
             json={
                 'query': query,
-                'variables': {
-                    'addresses': [wallet_address],
-                    'networks': ['ETHEREUM_MAINNET','POLYGON_MAINNET','BINANCE_SMART_CHAIN_MAINNET','BASE_MAINNET','METIS_MAINNET']
-                }
+                'variables': variables
             },
             timeout=30
         )
-     response.raise_for_status()
-     data = response.json()
-     if 'errors' in data:
-        raise ValueError(f"GraphQL Errors: {data['errors']}")
-     balance = data['data']['portfolio']['tokenBalances']
-     result = ''
-     for item in balance:
-        result += f"""Network:" {item["network"]}
-        Symbol: {item["token"]["baseToken"]["symbol"]}
-        Balance: {item["token"]["balance"]}
-        Balance USD: {item["token"]["balanceUSD"]}\n"""
-     return result   
+        response.raise_for_status()
+        data = response.json()
 
+        if 'errors' in data:
+            return f"GraphQL Error: {data['errors'][0]['message']}"
+
+        portfolio_data = data.get('data', {}).get('portfolio', {})
+        balances = portfolio_data.get('tokenBalances', [])
+
+        if not balances:
+            return f"No token balances found for wallet {wallet_address}"
+
+        # Format the output
+        output = [f"\nToken Balances for {wallet_address}"]
+        output.append("=" * 50)
+
+        # Group tokens by network
+        network_balances = {}
+        for balance in balances:
+            network = balance.get('network')
+            if network not in network_balances:
+                network_balances[network] = []
+            network_balances[network].append(balance)
+
+        total_usd_value = 0
+
+        # Display balances by network
+        for network, tokens in network_balances.items():
+            network_total = sum(float(t['token']['balanceUSD'] or 0) for t in tokens)
+            if network_total > 0:
+                output.append(f"\n{network}:")
+                
+                # Sort tokens by USD value
+                tokens.sort(key=lambda x: float(x['token']['balanceUSD'] or 0), reverse=True)
+                
+                for token in tokens:
+                    token_data = token['token']
+                    base_token = token_data['baseToken']
+                    balance = float(token_data['balance'] or 0)
+                    balance_usd = float(token_data['balanceUSD'] or 0)
+                    
+                    if balance_usd > 0.01:  # Filter out dust
+                        output.append(
+                            f"- {base_token['name']} ({base_token['symbol']}): "
+                            f"{balance:.4f} tokens = ${balance_usd:.2f}"
+                        )
+                        total_usd_value += balance_usd
+
+        if total_usd_value > 0:
+            output.append("\nTotal Portfolio Value:")
+            output.append(f"${total_usd_value:.2f} USD")
+
+        return "\n".join(output)
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request failed: {str(e)}")
+        return f"Failed to fetch data: {str(e)}"
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return f"An error occurred: {str(e)}"
      
 PRICE_TOOL_DESCRIPTION = """
 Tool for retrieving real-time cryptocurrency token prices. 
@@ -436,8 +526,8 @@ def initialize_agent():
         name="visualize_wallet",
         description=WALLET_SEARCH_PROMPT,
         cdp_agentkit_wrapper=agentkit,
-        func=search_wallet_transactions,
-        args_schema=EtherscanWalletSearchInput,
+        func=search_wallet_data,
+        args_schema=WalletSearchInput,
     )
 
     # Ensure tools is a list and add the new tool
