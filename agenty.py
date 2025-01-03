@@ -23,10 +23,106 @@ from cdp import Wallet
 from web3 import Web3
 from dotenv import load_dotenv
 
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+import speech_recognition as sr
+import threading
+import logging
+import re
+import time
+class VoiceCommandHandler:
+    def __init__(self, agent_executor, config):
+        self.recognizer = sr.Recognizer()
+        self.microphone = sr.Microphone()
+        self.is_listening = False
+        self.logger = logging.getLogger(__name__)
+        logging.basicConfig(level=logging.WARNING)  # Suppress detailed HTTP logs
+        self.agent_executor = agent_executor
+        self.config = config
+    def process_voice_command(self, command):
+        """
+        Process the recognized voice command using the agent executor.
+        Args:
+            command (str): Voice command to process.
+        Returns:
+            str: Agent's response to the command.
+        """
+        try:
+            response = ""
+            for chunk in self.agent_executor.stream(
+                 {"messages": [HumanMessage(content=command)]},
+                self.config
+            ):
+                if "agent" in chunk:
+                    response += chunk["agent"]["messages"][0].content
+                elif "tools" in chunk:
+                    response += chunk["tools"]["messages"][0].content
+                 
+            return self.format_response(response)
+        except Exception as e:
+            error_msg = f"Error processing command: {e}"
+            self.logger.error(error_msg)
+            return error_msg
+    def format_response(self, response):
+        """
+        Format the agent's response for better readability.
+        Args:
+            response (str): Raw response from the agent.
+        Returns:
+            str: Formatted response.
+        """
+        return "\n".join(line.strip() for line in response.split("\n") if line.strip())
+    def listen_and_respond(self):
+        """
+        Listen for voice commands and process them.
+        """
+        self.is_listening = True
+        print("Voice mode activated. Say 'exit' to end.")
+        while self.is_listening:
+            try:
+                with self.microphone as source:
+                    self.logger.info("Listening...")
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                    audio = self.recognizer.listen(source, timeout=15, phrase_time_limit=15)
+                try:
+                    # Recognize speech
+                    command = self.recognizer.recognize_google(audio).lower()
+                    print(f"Command recognized: {command}")
+                    print("-------------------")   
+                    # Check for exit command
+                    if command == 'exit':
+                        print("Exiting voice mode. Goodbye!")
+                        self.is_listening = False
+                        break
+                    # Process the command
+                    response = self.process_voice_command(command)
+                    # Print the response
+                    print(f"\n{response}\n")
+                    print("-------------------")   
+                except sr.UnknownValueError:
+                    print("Sorry, I could not understand that. Could you please repeat?")
+                except sr.RequestError:
+                    print("Speech recognition service is unavailable. Please try again later.")
+            except Exception as e:
+                self.logger.error(f"Unexpected error in voice processing: {e}")
+                print("An unexpected error occurred. Please try again.")
+    def start(self):
+        """
+        Start the voice command listener in a separate thread.
+        """
+        listener_thread = threading.Thread(target=self.listen_and_respond, daemon=True)
+        listener_thread.start()
+        return listener_thread
+    def stop(self):
+        """
+        Stop the voice command listener.
+        """
+        self.is_listening = False
+        print("Voice command listener stopped.")
 
 BRIDGE_USDC_PROMPT = """
 This tool bridges USDC from Base-Mainnet to Arbitrum-Mainnet using Circle's Cross-Chain Transfer Protocol (CCTP). 
@@ -615,6 +711,25 @@ def run_chat_mode(agent_executor, config):
             print("Goodbye Agent!")
             sys.exit(0)
 
+def run_voice_mode(agent_executor, config):
+    """
+    Run the agent interactively based on voice input.
+    
+    Args:
+        agent_executor: Agent executor instance.
+        config: Agent configuration.
+    """
+    try:
+        voice_handler = VoiceCommandHandler(agent_executor, config)
+        voice_thread = voice_handler.start()
+        # Keep the main thread running until voice thread completes
+        voice_thread.join()
+    except KeyboardInterrupt:
+        print("Voice mode interrupted.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"Error in voice mode: {e}")
+        sys.exit(1)
 
 # Mode Selection
 def choose_mode():
@@ -623,12 +738,14 @@ def choose_mode():
         print("\nAvailable modes:")
         print("1. chat    - Interactive chat mode")
         print("2. auto    - Autonomous action mode")
-
+        print("3. voice    - Interactive voice mode")
         choice = input("\nChoose a mode (enter number or name): ").lower().strip()
         if choice in ["1", "chat"]:
             return "chat"
         elif choice in ["2", "auto"]:
             return "auto"
+        elif choice in ["3", "voice"]:
+            return "voice"       
         print("Invalid choice. Please try again.")
 
 
@@ -641,6 +758,8 @@ def main():
         run_chat_mode(agent_executor=agent_executor, config=config)
     elif mode == "auto":
         run_autonomous_mode(agent_executor=agent_executor, config=config)
+    elif mode == "voice":
+        run_voice_mode(agent_executor=agent_executor, config=config)      
 
 
 if __name__ == "__main__":
