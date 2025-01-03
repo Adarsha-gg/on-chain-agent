@@ -5,6 +5,7 @@ import base64
 import requests
 import logging
 import json
+import re
 
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
@@ -16,12 +17,14 @@ from cdp_langchain.agent_toolkits import CdpToolkit
 from cdp_langchain.utils import CdpAgentkitWrapper
 from cdp_langchain.tools import CdpTool
 
-
 from typing import Optional,Dict, Any
 from pydantic import BaseModel, Field
 from cdp import Wallet
 from web3 import Web3
 from dotenv import load_dotenv
+
+import speech_recognition as sr
+import threading
 
 
 load_dotenv()
@@ -29,11 +32,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-import speech_recognition as sr
-import threading
-import logging
-import re
-import time
+
 class VoiceCommandHandler:
     def __init__(self, agent_executor, config):
         self.recognizer = sr.Recognizer()
@@ -43,6 +42,7 @@ class VoiceCommandHandler:
         logging.basicConfig(level=logging.WARNING)  # Suppress detailed HTTP logs
         self.agent_executor = agent_executor
         self.config = config
+
     def process_voice_command(self, command):
         """
         Process the recognized voice command using the agent executor.
@@ -67,6 +67,7 @@ class VoiceCommandHandler:
             error_msg = f"Error processing command: {e}"
             self.logger.error(error_msg)
             return error_msg
+
     def format_response(self, response):
         """
         Format the agent's response for better readability.
@@ -76,6 +77,7 @@ class VoiceCommandHandler:
             str: Formatted response.
         """
         return "\n".join(line.strip() for line in response.split("\n") if line.strip())
+
     def listen_and_respond(self):
         """
         Listen for voice commands and process them.
@@ -110,6 +112,7 @@ class VoiceCommandHandler:
             except Exception as e:
                 self.logger.error(f"Unexpected error in voice processing: {e}")
                 print("An unexpected error occurred. Please try again.")
+
     def start(self):
         """
         Start the voice command listener in a separate thread.
@@ -117,6 +120,7 @@ class VoiceCommandHandler:
         listener_thread = threading.Thread(target=self.listen_and_respond, daemon=True)
         listener_thread.start()
         return listener_thread
+        
     def stop(self):
         """
         Stop the voice command listener.
@@ -325,31 +329,6 @@ def recieve_cross_chain_message(destination_wallet: Wallet, message_bytes: str, 
             raise RuntimeError(
                 f"Both current and fallback wallets failed: {str(fallback_error)}"
             )
-
-import os
-import logging
-import requests
-from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field
-
-WALLET_SEARCH_PROMPT = """
-This tool searches for token balances across multiple networks using Zapper API, showing both token amounts and USD values.
-"""
-
-class WalletSearchInput(BaseModel):
-    """Input arguments for wallet search."""
-    wallet_address: str = Field(
-        ...,
-        description="The wallet address to look up",
-        example="0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
-    )
-
-import os
-import base64
-import logging
-import requests
-from typing import Dict, Any, Optional
-from pydantic import BaseModel, Field
 
 WALLET_SEARCH_PROMPT = """
 This tool fetches wallet token balances across networks using Zapper's GraphQL API.

@@ -6,4 +6,5 @@ Additions:
 Price checker: It can now get real time price from sources and use them to make decisions.
 Voice Mode: Use voice to send commands ezpz
 QR code Generation: Get qr code for your wallet or any other wallet if u want
-Cross Chain Transaction: Send funds from base to arbitrum ezpz just say you want to do so and done. 
+Cross Chain Transaction: Send funds from base to arbitrum ezpz just say you want to do so and done.
+Wallet balance: Can view the balance of a wallet across different chains.  
