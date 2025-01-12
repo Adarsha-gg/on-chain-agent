@@ -82,8 +82,8 @@ def generate_qr(wallet: Wallet, wallet_address: str, network: str) -> str:
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# logging.basicConfig(level=logging.INFO)
+# logger = logging.getLogger(__name__)
 
 
 class VoiceCommandHandler:
@@ -558,7 +558,7 @@ def get_token_price(token_identifier: str, currency: str = "USD") -> dict:
             url = f"https://api.coingecko.com/api/v3/simple/token_price/id={token_identifier}include_market_cap=true&include_24hr_vol=true&include_24hr_change=true&x_cg_demo_api_key={Api}"
         else:
             # Use token symbol lookup
-             url = f"https://api.coingecko.com/api/v3/simple/price?ids={token_identifier}&vs_currencies=USD&include_market_cap=true&x_cg_demo_api_key={Api}"
+             url = f"https://api.coingecko.com/api/v3/simple/price?ids={token_identifier}&vs_currencies=USD&include_market_cap=true&include_24hr_vol=true&include_24hr_change&x_cg_demo_api_key={Api}"
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
@@ -570,7 +570,6 @@ def get_token_price(token_identifier: str, currency: str = "USD") -> dict:
         return {
             "price": token_data.get(f"{currency.lower()}"),
             "market_cap": token_data.get(f"{currency.lower()}_market_cap"),
-            "24h_change": token_data.get(f"{currency.lower()}_24h_change"),
             "token": token_identifier
         }
     except requests.RequestException as e:
@@ -592,10 +591,10 @@ def run_token_price_tool(token_identifier: str, currency: str = "USD") -> str:
     return f"""Token Price Information for {token_identifier}:
 Price: {result['price']} {currency}
 Market Cap: {result['market_cap']} {currency}
-24h Change: {result['24h_change']}%"""
+"""
 
 # Configure a file to persist the agent's CDP MPC Wallet Data.
-wallet_data_file = "wallet_data.txt"
+wallet_data_file = "mainnet_wallet.txt"
 
 
 def initialize_agent():
